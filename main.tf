@@ -1,42 +1,79 @@
-variable "awsprops" {
-  type = map(string)
-  default = {
-    region       = "us-east-1"
-    vpc          = "vpc-5234832d"
-    ami          = "ami-0c1bea58988a989155"
-    itype        = "t2.micro"
-    subnet       = "subnet-81896c8e"
-    publicip     = true
-    keyname      = "myseckey"
-    secgroupname = "IAC-Sec-Group"
-  }
-}
+##################################################################################
+# PROVIDERS
+##################################################################################
 
 provider "aws" {
-  region = lookup(var.awsprops, "region")
+  access_key = var.aws_access_key
+  secret_key = var.aws_secret_key
+  region     = var.aws_region
 }
 
-resource "aws_security_group" "project-iac-sg" {
-  name        = lookup(var.awsprops, "secgroupname")
-  description = lookup(var.awsprops, "secgroupname")
-  vpc_id      = lookup(var.awsprops, "vpc")
+##################################################################################
+# DATA
+##################################################################################
 
-  // To Allow SSH Transport
-  ingress {
-    from_port   = 22
-    protocol    = "tcp"
-    to_port     = 22
-    cidr_blocks = ["0.0.0.0/0"]
+data "aws_ssm_parameter" "ami" {
+  name = "/aws/service/ami-amazon-linux-latest/amzn2-ami-hvm-x86_64-gp2"
+}
+
+##################################################################################
+# RESOURCES
+##################################################################################
+
+# NETWORKING #
+resource "aws_vpc" "vpc" {
+  cidr_block           = var.vpc_cidr_block
+  enable_dns_hostnames = var.enable_dns_hostnames
+
+  tags = local.common_tags
+}
+
+resource "aws_internet_gateway" "igw" {
+  vpc_id = aws_vpc.vpc.id
+
+  tags = local.common_tags
+}
+
+resource "aws_subnet" "subnet1" {
+  cidr_block              = var.vpc_subnet1_cidr_block
+  vpc_id                  = aws_vpc.vpc.id
+  map_public_ip_on_launch = var.map_public_ip_on_launch
+
+  tags = local.common_tags
+}
+
+# ROUTING #
+resource "aws_route_table" "rtb" {
+  vpc_id = aws_vpc.vpc.id
+
+  route {
+    cidr_block = "0.0.0.0/0"
+    gateway_id = aws_internet_gateway.igw.id
   }
 
-  // To Allow Port 80 Transport
+  tags = local.common_tags
+}
+
+resource "aws_route_table_association" "rta-subnet1" {
+  subnet_id      = aws_subnet.subnet1.id
+  route_table_id = aws_route_table.rtb.id
+}
+
+# SECURITY GROUPS #
+# Nginx security group 
+resource "aws_security_group" "nginx-sg" {
+  name   = "nginx_sg"
+  vpc_id = aws_vpc.vpc.id
+
+  # HTTP access from anywhere
   ingress {
     from_port   = 80
-    protocol    = ""
     to_port     = 80
+    protocol    = "tcp"
     cidr_blocks = ["0.0.0.0/0"]
   }
 
+  # outbound internet access
   egress {
     from_port   = 0
     to_port     = 0
@@ -44,40 +81,24 @@ resource "aws_security_group" "project-iac-sg" {
     cidr_blocks = ["0.0.0.0/0"]
   }
 
-  lifecycle {
-    create_before_destroy = true
-  }
+  tags = local.common_tags
 }
 
+# INSTANCES #
+resource "aws_instance" "nginx1" {
+  ami                    = nonsensitive(data.aws_ssm_parameter.ami.value)
+  instance_type          = var.instance_type
+  subnet_id              = aws_subnet.subnet1.id
+  vpc_security_group_ids = [aws_security_group.nginx-sg.id]
 
-resource "aws_instance" "project-iac" {
-  ami                         = lookup(var.awsprops, "ami")
-  instance_type               = lookup(var.awsprops, "itype")
-  subnet_id                   = lookup(var.awsprops, "subnet") #FFXsubnet2
-  associate_public_ip_address = lookup(var.awsprops, "publicip")
-  key_name                    = lookup(var.awsprops, "keyname")
+  user_data = <<EOF
+#! /bin/bash
+sudo amazon-linux-extras install -y nginx1
+sudo service nginx start
+sudo rm /usr/share/nginx/html/index.html
+echo '<html><head><title>Taco Team Server</title></head><body style=\"background-color:#1F778D\"><p style=\"text-align: center;\"><span style=\"color:#FFFFFF;\"><span style=\"font-size:28px;\">You did it! Have a &#127790;</span></span></p></body></html>' | sudo tee /usr/share/nginx/html/index.html
+EOF
 
+  tags = local.common_tags
 
-  vpc_security_group_ids = [
-    aws_security_group.project-iac-sg.id
-  ]
-  root_block_device {
-    delete_on_termination = true
-    iops                  = 150
-    volume_size           = 50
-    volume_type           = "gp2"
-  }
-  tags = {
-    Name        = "SERVER01"
-    Environment = "DEV"
-    OS          = "UBUNTU"
-    Managed     = "IAC"
-  }
-
-  depends_on = [aws_security_group.project-iac-sg]
-}
-
-
-output "ec2instance" {
-  value = aws_instance.project-iac.public_ip
 }
